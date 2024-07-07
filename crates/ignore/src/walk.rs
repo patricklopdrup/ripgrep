@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
     sync::Arc,
+    time::UNIX_EPOCH,
 };
 
 use {
@@ -485,6 +486,7 @@ pub struct WalkBuilder {
     ig_builder: IgnoreBuilder,
     max_depth: Option<usize>,
     max_filesize: Option<u64>,
+    skip_modified_before: Option<u64>,
     follow_links: bool,
     same_file_system: bool,
     sorter: Option<Sorter>,
@@ -509,6 +511,7 @@ impl std::fmt::Debug for WalkBuilder {
             .field("ig_builder", &self.ig_builder)
             .field("max_depth", &self.max_depth)
             .field("max_filesize", &self.max_filesize)
+            .field("skip_modified_before", &self.skip_modified_before)
             .field("follow_links", &self.follow_links)
             .field("threads", &self.threads)
             .field("skip", &self.skip)
@@ -529,6 +532,7 @@ impl WalkBuilder {
             ig_builder: IgnoreBuilder::new(),
             max_depth: None,
             max_filesize: None,
+            skip_modified_before: None,
             follow_links: false,
             same_file_system: false,
             sorter: None,
@@ -582,6 +586,7 @@ impl WalkBuilder {
             ig_root: ig_root.clone(),
             ig: ig_root.clone(),
             max_filesize: self.max_filesize,
+            skip_modified_before: self.skip_modified_before,
             skip: self.skip.clone(),
             filter: self.filter.clone(),
         }
@@ -598,6 +603,7 @@ impl WalkBuilder {
             ig_root: self.ig_builder.build(),
             max_depth: self.max_depth,
             max_filesize: self.max_filesize,
+            skip_modified_before: self.skip_modified_before,
             follow_links: self.follow_links,
             same_file_system: self.same_file_system,
             threads: self.threads,
@@ -633,6 +639,15 @@ impl WalkBuilder {
     /// Whether to ignore files above the specified limit.
     pub fn max_filesize(&mut self, filesize: Option<u64>) -> &mut WalkBuilder {
         self.max_filesize = filesize;
+        self
+    }
+
+    /// Whether to ignore files modified before the specified limit.
+    pub fn skip_modified_before(
+        &mut self,
+        modified_time: Option<u64>,
+    ) -> &mut WalkBuilder {
+        self.skip_modified_before = modified_time;
         self
     }
 
@@ -915,6 +930,7 @@ pub struct Walk {
     ig_root: Ignore,
     ig: Ignore,
     max_filesize: Option<u64>,
+    skip_modified_before: Option<u64>,
     skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
 }
@@ -953,6 +969,13 @@ impl Walk {
         if self.max_filesize.is_some() && !ent.is_dir() {
             return Ok(skip_filesize(
                 self.max_filesize.unwrap(),
+                ent.path(),
+                &ent.metadata().ok(),
+            ));
+        }
+        if self.skip_modified_before.is_some() && !ent.is_dir() {
+            return Ok(skip_modified_before(
+                self.skip_modified_before.unwrap(),
                 ent.path(),
                 &ent.metadata().ok(),
             ));
@@ -1190,6 +1213,7 @@ pub struct WalkParallel {
     paths: std::vec::IntoIter<PathBuf>,
     ig_root: Ignore,
     max_filesize: Option<u64>,
+    skip_modified_before: Option<u64>,
     max_depth: Option<usize>,
     follow_links: bool,
     same_file_system: bool,
@@ -1291,6 +1315,7 @@ impl WalkParallel {
                     active_workers: active_workers.clone(),
                     max_depth: self.max_depth,
                     max_filesize: self.max_filesize,
+                    skip_modified_before: self.skip_modified_before,
                     follow_links: self.follow_links,
                     skip: self.skip.clone(),
                     filter: self.filter.clone(),
@@ -1479,6 +1504,9 @@ struct Worker<'s> {
     /// The maximum size a searched file can be (in bytes). If a file exceeds
     /// this size it will be skipped.
     max_filesize: Option<u64>,
+    /// The modified date of a searched file in seconds since epoch. If a file
+    /// is modified before this time it will be skipped.
+    skip_modified_before: Option<u64>,
     /// Whether to follow symbolic links or not. When this is enabled, loop
     /// detection is performed.
     follow_links: bool,
@@ -1645,13 +1673,26 @@ impl<'s> Worker<'s> {
             } else {
                 false
             };
+        let should_skip_modified_before =
+            if self.skip_modified_before.is_some() && !dent.is_dir() {
+                skip_modified_before(
+                    self.skip_modified_before.unwrap(),
+                    dent.path(),
+                    &dent.metadata().ok(),
+                )
+            } else {
+                false
+            };
         let should_skip_filtered =
             if let Some(Filter(predicate)) = &self.filter {
                 !predicate(&dent)
             } else {
                 false
             };
-        if !should_skip_filesize && !should_skip_filtered {
+        if !should_skip_filesize
+            && !should_skip_modified_before
+            && !should_skip_filtered
+        {
             self.send(Work { dent, ignore: ig.clone(), root_device });
         }
         WalkState::Continue
@@ -1784,6 +1825,36 @@ fn skip_filesize(
     if let Some(fs) = filesize {
         if fs > max_filesize {
             log::debug!("ignoring {}: {} bytes", path.display(), fs);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// Before calling this function, make sure that you ensure that is really
+// necessary as the arguments imply a file stat.
+fn skip_modified_before(
+    skip_modified_before: u64,
+    path: &Path,
+    ent: &Option<Metadata>,
+) -> bool {
+    let modified_time = match *ent {
+        Some(ref md) => Some(md.modified()),
+        None => None,
+    };
+
+    if let Some(Ok(date)) = modified_time {
+        let seconds_since_epoch =
+            date.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if seconds_since_epoch < skip_modified_before {
+            log::debug!(
+                "ignoring {}: modified at epoch time {}",
+                path.display(),
+                seconds_since_epoch
+            );
             true
         } else {
             false

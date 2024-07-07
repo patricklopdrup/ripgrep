@@ -73,6 +73,7 @@ pub(crate) struct LowArgs {
     pub(crate) max_count: Option<u64>,
     pub(crate) max_depth: Option<usize>,
     pub(crate) max_filesize: Option<u64>,
+    pub(crate) skip_modified_before: Option<u64>,
     pub(crate) mmap: MmapMode,
     pub(crate) multiline: bool,
     pub(crate) multiline_dotall: bool,

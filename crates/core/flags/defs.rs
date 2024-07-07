@@ -95,6 +95,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &MaxCount,
     &MaxDepth,
     &MaxFilesize,
+    &SkipModifiedBefore,
     &Mmap,
     &Multiline,
     &MultilineDotall,
@@ -3962,6 +3963,60 @@ fn test_max_filesize() {
     assert_eq!(Some(1024 * 1024), args.max_filesize);
 }
 
+/// --skip-modified-before
+#[derive(Debug)]
+struct SkipModifiedBefore;
+
+impl Flag for SkipModifiedBefore {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_long(&self) -> &'static str {
+        "skip-modified-before"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("TIME")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Filter
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Ignore files modified before TIME."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+Ignore files modified before \fITIME\fP. This does not apply to directories.
+.sp
+The input format accepts a number followed by suffixes of \fBm\fP, \fBh\fP,
+\fBd\fP, or \fBw\fP, which correspond to minutes, hours, days, and weeks,
+respectively. If no suffix is provided the input is treated as seconds.
+.sp
+Examples: \fB\-\-skip\-modified\-before 14h\fP or \fB\-\-skip\-modified\-before 2w\fP.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        let v = v.unwrap_value();
+        args.skip_modified_before = Some(convert::human_readable_time_u64(&v)?);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_skip_modified_before() {
+    use std::time::SystemTime;
+
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(None, args.skip_modified_before);
+
+    let time_now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let time_2h_ago = time_now - (2 * 60 * 60);
+    let args = parse_low_raw(["--skip-modified-before", "2h"]).unwrap();
+    assert_eq!(Some(time_2h_ago), args.skip_modified_before);
+}
+
 /// --mmap
 #[derive(Debug)]
 struct Mmap;
@@ -7507,6 +7562,19 @@ mod convert {
         };
         Ok(size)
     }
+
+    pub(super) fn human_readable_time_u64(v: &OsStr) -> anyhow::Result<u64> {
+        grep::cli::parse_human_readable_time(str(v)?).context("invalid time")
+    }
+
+    pub(super) fn human_readable_time_usize(v: &OsStr) -> anyhow::Result<usize> {
+        let date = human_readable_time_u64(v)?;
+        let Ok(size) = usize::try_from(date) else {
+            anyhow::bail!("time is too large")
+        };
+        Ok(size)
+    }
+
 }
 
 #[cfg(test)]

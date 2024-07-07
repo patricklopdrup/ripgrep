@@ -138,7 +138,7 @@ pub use crate::{
     },
     escape::{escape, escape_os, unescape, unescape_os},
     hostname::hostname,
-    human::{parse_human_readable_size, ParseSizeError},
+    human::{parse_human_readable_size, parse_human_readable_time, ParseSizeError, ParseTimeError},
     pattern::{
         pattern_from_bytes, pattern_from_os, patterns_from_path,
         patterns_from_reader, patterns_from_stdin, InvalidPatternError,
